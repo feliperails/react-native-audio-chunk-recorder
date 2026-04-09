@@ -1,6 +1,6 @@
 {
   "name": "@asolerp/react-native-audio-chunk-recorder",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "React Native audio recording with chunking support",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -25,11 +25,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/asolerp/react-native-audio-chunk-recorder.git"
+    "url": "git+https://github.com/feliperails/react-native-audio-chunk-recorder.git"
   },
-  "homepage": "https://github.com/asolerp/react-native-audio-chunk-recorder#readme",
+  "homepage": "https://github.com/feliperails/react-native-audio-chunk-recorder#readme",
   "bugs": {
-    "url": "https://github.com/asolerp/react-native-audio-chunk-recorder/issues"
+    "url": "https://github.com/feliperails/react-native-audio-chunk-recorder/issues"
   },
   "peerDependencies": {
     "react": ">=16.8.0 <20.0.0",

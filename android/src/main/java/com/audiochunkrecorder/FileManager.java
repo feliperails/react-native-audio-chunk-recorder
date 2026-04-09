@@ -83,7 +83,7 @@ public class FileManager {
      * @param chunkIndex Chunk sequence number
      * @return File path if successful, null if failed
      */
-    public String saveChunkToFile(byte[] audioData, int chunkIndex) {
+    public String saveChunkToFile(byte[] audioData, int chunkIndex, int sampleRate) {
         if (audioData == null || audioData.length == 0) {
             Log.w(TAG, "Cannot save chunk: audio data is null or empty");
             return null;
@@ -93,8 +93,7 @@ public class FileManager {
             File chunkFile = createChunkFile(chunkIndex);
             Log.d(TAG, "💾 SAVING CHUNK TO FILE: " + chunkFile.getAbsolutePath());
             
-            // Use default sample rate of 16000 Hz
-            writeWavFile(chunkFile, audioData, 16000);
+            writeWavFile(chunkFile, audioData, sampleRate);
             
             return chunkFile.getAbsolutePath();
         } catch (IOException e) {

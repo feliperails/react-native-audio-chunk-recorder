@@ -526,6 +526,15 @@ public class AudioRecorderManager {
 
     private void finishCurrentChunk(boolean isStoppingRecording) {
         Log.d(TAG, "🔚 FINISHING CHUNK: currentChunkIndex=" + currentChunkIndex.get() + ", isStoppingRecording=" + isStoppingRecording);
+
+        int chunkSampleRate = 16000;
+        if (audioRecord != null) {
+            try {
+                chunkSampleRate = audioRecord.getSampleRate();
+            } catch (Exception e) {
+                Log.w(TAG, "Could not read recorder sample rate, using fallback 16000Hz");
+            }
+        }
         
         if (audioRecord != null) {
             audioRecord.stop();
@@ -555,7 +564,7 @@ public class AudioRecorderManager {
                     Log.d(TAG, "💾 SAVING CHUNK: size=" + chunkSize + " bytes, duration=" + actualChunkDuration + "s");
                     
                     // Save to file
-                    String chunkPath = fileManager.saveChunkToFile(audioData, currentChunkIndex.get());
+                    String chunkPath = fileManager.saveChunkToFile(audioData, currentChunkIndex.get(), chunkSampleRate);
                     
                     // ALWAYS emit the chunk event
                     if (chunkPath != null) {
