@@ -298,6 +298,17 @@ export const useAudioRecorderCore = (
   const recordingStartTimeRef = useRef<number | null>(null);
   const pausedTimeRef = useRef<number>(0);
   const durationIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Latched once we fire onMaxDurationReached for a session, cleared on the
+  // next startRecording. Prevents the duration-tracking effect from
+  // re-triggering when consumers pass a fresh `options.onMaxDurationReached`
+  // callback every render (which causes the effect to re-run, re-create the
+  // interval, and read a stale recordingStartTimeRef).
+  const maxDurationFiredRef = useRef(false);
+  // Stash the consumer's onMaxDurationReached so the duration-tracking
+  // effect doesn't need it in its dep array. Listing it there caused the
+  // effect to thrash whenever the consumer re-rendered with a fresh callback.
+  const onMaxDurationReachedRef = useRef(options.onMaxDurationReached);
+  onMaxDurationReachedRef.current = options.onMaxDurationReached;
 
   // Event listener manager - singleton instance
   const eventManagerRef = useRef<EventListenerManager | null>(null);
@@ -459,6 +470,7 @@ export const useAudioRecorderCore = (
         // Start duration tracking
         recordingStartTimeRef.current = Date.now();
         pausedTimeRef.current = 0;
+        maxDurationFiredRef.current = false;
         updateState({ maxRecordingDuration: maxDuration });
       } catch (error) {
         console.error("AudioRecorderCore: ❌ Start recording failed:", error);
@@ -595,7 +607,11 @@ export const useAudioRecorderCore = (
       }
 
       durationIntervalRef.current = setInterval(() => {
-        if (recordingStartTimeRef.current && !isPausedRef.current) {
+        if (
+          recordingStartTimeRef.current &&
+          !isPausedRef.current &&
+          !maxDurationFiredRef.current
+        ) {
           const elapsed =
             (Date.now() -
               recordingStartTimeRef.current -
@@ -605,6 +621,10 @@ export const useAudioRecorderCore = (
 
           // Check if max duration reached
           if (elapsed >= state.maxRecordingDuration) {
+            // Latch first so any racing tick (or a re-created interval from
+            // a re-running effect reading a stale start time) bails out.
+            maxDurationFiredRef.current = true;
+            recordingStartTimeRef.current = null;
             clearInterval(durationIntervalRef.current!);
             durationIntervalRef.current = null;
 
@@ -621,7 +641,7 @@ export const useAudioRecorderCore = (
                   "onMaxDurationReached",
                   maxDurationData
                 );
-                options.onMaxDurationReached?.(maxDurationData);
+                onMaxDurationReachedRef.current?.(maxDurationData);
 
                 errorTracker.addBreadcrumb({
                   message: `Max recording duration reached: ${elapsed}s / ${state.maxRecordingDuration}s`,
@@ -660,7 +680,6 @@ export const useAudioRecorderCore = (
     state.maxRecordingDuration,
     updateState,
     stopRecording,
-    options.onMaxDurationReached,
     errorTracker,
   ]);
 
