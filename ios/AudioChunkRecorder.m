@@ -288,8 +288,8 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
         NSMutableArray *deletedFiles = [NSMutableArray array];
         
         for (NSString *fileName in files) {
-            // Delete files that start with "chunk_" and end with ".m4a"
-            if ([fileName hasPrefix:@"chunk_"] && [fileName hasSuffix:@".m4a"]) {
+            // Delete files that start with "chunk_" and end with ".wav"
+            if ([fileName hasPrefix:@"chunk_"] && [fileName hasSuffix:@".wav"]) {
                 NSString *filePath = [documentsPath stringByAppendingPathComponent:fileName];
                 NSError *deleteError = nil;
                 
@@ -337,13 +337,16 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     self.chunkStartTime = [NSDate timeIntervalSinceReferenceDate];
     self.accumulatedRecordingTime = 0.0;
     
-    // Pre-configure settings to minimize setup time
+    // PCM 16-bit mono WAV — matches the Android recorder output so both
+    // platforms produce identical container/codec for the backend.
     NSDictionary *settings = @{
-        AVFormatIDKey: @(kAudioFormatMPEG4AAC),
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
         AVSampleRateKey: @(self.sampleRate),
         AVNumberOfChannelsKey: @1,
-        AVEncoderAudioQualityKey: @(AVAudioQualityMedium),
-        AVEncoderBitRateKey: @(self.bitRate)
+        AVLinearPCMBitDepthKey: @16,
+        AVLinearPCMIsFloatKey: @NO,
+        AVLinearPCMIsBigEndianKey: @NO,
+        AVLinearPCMIsNonInterleaved: @NO
     };
 
     // Create and configure recorder quickly to minimize audio level interruption
@@ -902,7 +905,7 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
 // Builds the URL for the next audio chunk file
 - (NSURL *)nextFileURL {
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *fileName = [NSString stringWithFormat:@"chunk_%04ld.m4a", (long)self.seq];
+    NSString *fileName = [NSString stringWithFormat:@"chunk_%04ld.wav", (long)self.seq];
     return [NSURL fileURLWithPath:[docs stringByAppendingPathComponent:fileName]];
 }
 
