@@ -16,6 +16,7 @@ declare class AudioManager {
     private nativeService;
     private initializationPromise;
     private constructor();
+    private subscribeToNativeStateChanges;
     static getInstance(): AudioManager;
     private initializeNativeService;
     private ensureInitialized;
