@@ -440,6 +440,44 @@ export const useAudioRecorderCore = (
     updateAudioLevel,
   ]); // Add updateState and updateAudioLevel to dependencies
 
+  // iOS emits `onMaxDurationReached` from native when its own maxDurationTimer
+  // fires, then immediately emits `onStateChange(isRecording: false)`. The JS
+  // duration-tracking interval below races and is typically cleared by the
+  // state change before it can fire — so without this subscription, iOS
+  // consumers never see the max-duration callback. Android has no native
+  // timer, so this is a no-op there and the JS interval handles it instead.
+  useEffect(() => {
+    const sub = AudioChunkRecorderEventEmitter.addListener(
+      "onMaxDurationReached",
+      (data: { duration: number; maxDuration: number }) => {
+        if (maxDurationFiredRef.current) return;
+        maxDurationFiredRef.current = true;
+
+        if (durationIntervalRef.current) {
+          clearInterval(durationIntervalRef.current);
+          durationIntervalRef.current = null;
+        }
+        recordingStartTimeRef.current = null;
+
+        const maxDurationData: MaxDurationReachedData = {
+          duration: data.duration,
+          maxDuration: data.maxDuration,
+          chunks: chunksRef.current,
+        };
+
+        eventManagerRef.current!.notifyListeners(
+          "onMaxDurationReached",
+          maxDurationData
+        );
+        onMaxDurationReachedRef.current?.(maxDurationData);
+      }
+    );
+
+    return () => {
+      sub.remove();
+    };
+  }, []);
+
   // Memoized actions to prevent unnecessary re-creation
   const startRecording = useCallback(
     async (recordingOptions?: RecordingOptions) => {
