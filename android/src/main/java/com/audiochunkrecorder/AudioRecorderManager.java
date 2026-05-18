@@ -494,26 +494,18 @@ public class AudioRecorderManager {
     }
 
     /**
-     * Rotate to the next chunk - finish current and start new one
+     * Rotate to the next chunk WITHOUT stopping the mic.
+     *
+     * Unlike iOS (AVAudioRecorder writes to a file), here we own the raw PCM
+     * buffer, so we can atomically swap it under audioDataLock while the
+     * capture loop keeps reading samples into the new buffer. No mic stop,
+     * no re-init — the joined chunks are sample-accurate continuous audio.
      */
     private void rotateToNextChunk() {
         try {
-            Log.d(TAG, "🔄 ROTATING: Finishing chunk " + currentChunkIndex.get() + " and starting next");
-            
-            // 1. Finish current chunk
+            Log.d(TAG, "🔄 ROTATING: Finishing chunk " + currentChunkIndex.get() + " (mic stays live)");
             finishCurrentChunk(false);
-            
-            // 2. Start new chunk with same sample rate
-            int currentSampleRate = 16000; // Default fallback
-            try {
-                if (audioRecord != null) {
-                    currentSampleRate = audioRecord.getSampleRate();
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Could not get current sample rate, using default");
-            }
-            
-            startNewChunk(currentSampleRate, false);
+            scheduleRotation(chunkDuration);
         } catch (Exception e) {
             Log.e(TAG, "❌ ERROR in rotation: " + e.getMessage());
             eventEmitter.sendErrorEvent("Failed to rotate chunk: " + e.getMessage());
@@ -535,65 +527,69 @@ public class AudioRecorderManager {
                 Log.w(TAG, "Could not read recorder sample rate, using fallback 16000Hz");
             }
         }
-        
-        if (audioRecord != null) {
-            audioRecord.stop();
-            audioRecord.release();
-            audioRecord = null;
+
+        // Only tear down the recorder on a full stop. During rotation we want
+        // the mic to stay live so the next chunk starts on the very next sample.
+        if (isStoppingRecording) {
+            if (audioRecord != null) {
+                audioRecord.stop();
+                audioRecord.release();
+                audioRecord = null;
+            }
+            if (chunkTimer != null) {
+                chunkTimer.cancel();
+                chunkTimer = null;
+            }
         }
-        
-        if (chunkTimer != null) {
-            chunkTimer.cancel();
-            chunkTimer = null;
-        }
-        
-        // Calculate chunk duration and size
-        long chunkEndTime = System.currentTimeMillis();
-        double actualChunkDuration = (chunkEndTime - currentChunkStartTime) / 1000.0;
-        long chunkSize = 0;
-        
-        Log.d(TAG, "⏰ CHUNK DURATION: actualChunkDuration=" + actualChunkDuration + "s");
-        
-        // Save the chunk data (only for normal recording)
+
+        // Atomically swap the audio buffer. The capture loop holds audioDataLock
+        // when writing samples, so any read in flight either lands in the chunk
+        // we're finishing or the fresh buffer for the next chunk — no samples
+        // are dropped at the boundary.
+        byte[] audioData = null;
         if (!isAudioLevelMonitoring) {
             synchronized (audioDataLock) {
                 if (audioDataBuffer != null) {
-                    byte[] audioData = audioDataBuffer.toByteArray();
-                    chunkSize = audioData.length;
-                    
-                    Log.d(TAG, "💾 SAVING CHUNK: size=" + chunkSize + " bytes, duration=" + actualChunkDuration + "s");
-                    
-                    // Save to file
-                    String chunkPath = fileManager.saveChunkToFile(audioData, currentChunkIndex.get(), chunkSampleRate);
-                    
-                    // ALWAYS emit the chunk event
-                    if (chunkPath != null) {
-                        Log.d(TAG, "✅ EMITTING CHUNK EVENT: chunkIndex=" + currentChunkIndex.get() + ", path=" + chunkPath);
-                        eventEmitter.sendChunkEvent(
-                            currentChunkIndex.get(),
-                            chunkPath,
-                            currentChunkStartTime,
-                            chunkSize
-                        );
-                    } else {
-                        Log.e(TAG, "❌ FAILED TO SAVE CHUNK: chunkIndex=" + currentChunkIndex.get());
-                        eventEmitter.sendErrorEvent("Failed to save chunk " + currentChunkIndex.get());
-                    }
-                    
-                    // Clean up buffer
-                    audioDataBuffer = null;
-                } else {
-                    Log.w(TAG, "⚠️ NO AUDIO DATA: audioDataBuffer is null for chunk " + currentChunkIndex.get());
+                    audioData = audioDataBuffer.toByteArray();
+                    try { audioDataBuffer.close(); } catch (IOException ignored) {}
+                    audioDataBuffer = isStoppingRecording ? null : new ByteArrayOutputStream();
                 }
             }
         }
-        
-        // Only increment chunk index if not stopping recording
+
+        long chunkEndTime = System.currentTimeMillis();
+        double actualChunkDuration = (chunkEndTime - currentChunkStartTime) / 1000.0;
+        int finishedChunkIndex = currentChunkIndex.get();
+        long finishedChunkStartTime = currentChunkStartTime;
+
+        // Advance bookkeeping for the next chunk BEFORE the disk write so the
+        // fresh buffer (already capturing) represents the correct chunk index.
         if (!isStoppingRecording) {
             currentChunkIndex.incrementAndGet();
+            currentChunkStartTime = chunkEndTime;
             Log.d(TAG, "🔢 INCREMENTED CHUNK INDEX: new currentChunkIndex=" + currentChunkIndex.get());
         }
-        
-        Log.d(TAG, "🏁 CHUNK FINISHED: chunkIndex=" + (isStoppingRecording ? currentChunkIndex.get() : currentChunkIndex.get() - 1));
+
+        Log.d(TAG, "⏰ CHUNK DURATION: actualChunkDuration=" + actualChunkDuration + "s");
+
+        if (!isAudioLevelMonitoring) {
+            if (audioData != null) {
+                long chunkSize = audioData.length;
+                Log.d(TAG, "💾 SAVING CHUNK: index=" + finishedChunkIndex + ", size=" + chunkSize + " bytes, duration=" + actualChunkDuration + "s");
+
+                String chunkPath = fileManager.saveChunkToFile(audioData, finishedChunkIndex, chunkSampleRate);
+                if (chunkPath != null) {
+                    Log.d(TAG, "✅ EMITTING CHUNK EVENT: chunkIndex=" + finishedChunkIndex + ", path=" + chunkPath);
+                    eventEmitter.sendChunkEvent(finishedChunkIndex, chunkPath, finishedChunkStartTime, chunkSize);
+                } else {
+                    Log.e(TAG, "❌ FAILED TO SAVE CHUNK: chunkIndex=" + finishedChunkIndex);
+                    eventEmitter.sendErrorEvent("Failed to save chunk " + finishedChunkIndex);
+                }
+            } else {
+                Log.w(TAG, "⚠️ NO AUDIO DATA: audioDataBuffer was null for chunk " + finishedChunkIndex);
+            }
+        }
+
+        Log.d(TAG, "🏁 CHUNK FINISHED: chunkIndex=" + finishedChunkIndex);
     }
 } 
