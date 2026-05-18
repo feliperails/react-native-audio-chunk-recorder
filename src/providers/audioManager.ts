@@ -1,4 +1,8 @@
-import { NativeAudioChunkRecorder } from "../NativeAudioChunkRecorder";
+import {
+  AudioChunkRecorderEventEmitter,
+  NativeAudioChunkRecorder,
+} from "../NativeAudioChunkRecorder";
+import type { StateChangeData } from "../types";
 
 export type AudioActivityType = "recording" | "monitoring";
 
@@ -22,6 +26,29 @@ class AudioManager {
 
   private constructor() {
     this.initializationPromise = this.initializeNativeService();
+    this.subscribeToNativeStateChanges();
+  }
+
+  // Native auto-stops (max duration on iOS, fatal errors, etc.) end the
+  // recording without going through our stopRecording() — so our isRecording
+  // flag goes stale and the next startRecording short-circuits with
+  // "Already recording". Mirror native state here to keep the singleton
+  // consistent regardless of who ended the session.
+  private subscribeToNativeStateChanges() {
+    AudioChunkRecorderEventEmitter.addListener(
+      "onStateChange",
+      (state: StateChangeData) => {
+        if (state.isRecording) return;
+        if (this.isRecording) {
+          this.isRecording = false;
+          this.notifyListeners("recording", false);
+        }
+        if (this.isMonitoring) {
+          this.isMonitoring = false;
+          this.notifyListeners("monitoring", false);
+        }
+      }
+    );
   }
 
   static getInstance(): AudioManager {
