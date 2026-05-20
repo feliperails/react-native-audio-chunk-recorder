@@ -96,6 +96,19 @@ public class EventEmitter {
     }
 
     /**
+     * Send full-recording-ready event with the single continuous WAV path.
+     */
+    public void sendFullRecordingReadyEvent(String path, long startTimestamp, long fileSize, double durationSeconds) {
+        WritableMap map = Arguments.createMap();
+        map.putString("path", path);
+        map.putDouble("timestamp", startTimestamp);
+        map.putDouble("size", fileSize);
+        map.putDouble("durationSeconds", durationSeconds);
+        sendEvent("onFullRecordingReady", map);
+        Log.d(TAG, "📤 FULL RECORDING EVENT SENT: path=" + path + ", size=" + fileSize + ", duration=" + durationSeconds + "s");
+    }
+
+    /**
      * Send interruption event
      */
     public void sendInterruptionEvent(WritableMap interruptionData) {

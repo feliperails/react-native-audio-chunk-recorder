@@ -6,6 +6,7 @@ import type {
   StateChangeData,
   AudioLevelData,
   InterruptionData,
+  FullRecordingData,
 } from "./types";
 
 const { AudioChunkRecorder } = NativeModules;
@@ -53,6 +54,7 @@ export interface AudioChunkRecorderEvents {
   onStateChange: (state: StateChangeData) => void;
   onAudioLevel: (levelData: AudioLevelData) => void;
   onInterruption: (interruption: InterruptionData) => void;
+  onFullRecordingReady: (data: FullRecordingData) => void;
 }
 
 export type AudioChunkRecorderEventType = keyof AudioChunkRecorderEvents;
