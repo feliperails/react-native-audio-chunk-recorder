@@ -345,11 +345,8 @@ public class AudioRecorderManager {
                 int leftover = all.length - head.length;
                 chunkBuffer.reset();
                 if (leftover > 0) {
-                    try {
-                        chunkBuffer.write(all, head.length, leftover);
-                    } catch (IOException e) {
-                        Log.e(TAG, "Error preserving chunk leftover: " + e.getMessage());
-                    }
+                    // ByteArrayOutputStream.write(byte[], int, int) does not throw.
+                    chunkBuffer.write(all, head.length, leftover);
                 }
 
                 int idx = currentChunkIndex.getAndIncrement();
