@@ -19,6 +19,7 @@ import type {
   AudioLevelData,
   RecordingOptions,
   MaxDurationReachedData,
+  FullRecordingData,
 } from "../types";
 import { reactNativeAlertProvider } from "../providers/reactNativeAlertProvider";
 import { createSimpleStateManager } from "../providers/simpleStateManager";
@@ -50,6 +51,7 @@ class EventListenerManager {
     onInterruption: new Set<(interruption: InterruptionData) => void>(),
     onStateChange: new Set<(state: StateChangeData) => void>(),
     onMaxDurationReached: new Set<(data: MaxDurationReachedData) => void>(),
+    onFullRecordingReady: new Set<(data: FullRecordingData) => void>(),
   };
 
   private nativeListeners: any[] = [];
@@ -217,12 +219,23 @@ class EventListenerManager {
       }
     );
 
+    // Full recording listener — fires once on stop with the single
+    // continuous WAV captured for the whole session.
+    const fullRecordingListener = AudioChunkRecorderEventEmitter.addListener(
+      "onFullRecordingReady",
+      (data: FullRecordingData) => {
+        this.notifyListeners("onFullRecordingReady", data);
+        options.onFullRecordingReady?.(data);
+      }
+    );
+
     this.nativeListeners = [
       chunkListener,
       levelListener,
       errorListener,
       stateListener,
       interruptionListener,
+      fullRecordingListener,
     ];
   }
 
@@ -434,6 +447,7 @@ export const useAudioRecorderCore = (
     options.onError,
     options.onStateChange,
     options.onInterruption,
+    options.onFullRecordingReady,
     options.chunkUploader,
     options.interruptionHandler,
     updateState,
@@ -825,6 +839,19 @@ export const useAudioRecorderCore = (
     []
   );
 
+  const onFullRecordingReady = useCallback(
+    (callback: (data: FullRecordingData) => void) => {
+      eventManagerRef.current!.addListener("onFullRecordingReady", callback);
+      return () => {
+        eventManagerRef.current!.removeListener(
+          "onFullRecordingReady",
+          callback
+        );
+      };
+    },
+    []
+  );
+
   // Utility functions with memoization
   const getExpectedChunkDuration = useCallback((): number => {
     return options.defaultRecordingOptions?.chunkSeconds || 30;
@@ -875,6 +902,7 @@ export const useAudioRecorderCore = (
       onInterruption,
       onStateChange,
       onMaxDurationReached,
+      onFullRecordingReady,
     }),
     [
       state.isRecording,
@@ -902,6 +930,7 @@ export const useAudioRecorderCore = (
       onInterruption,
       onStateChange,
       onMaxDurationReached,
+      onFullRecordingReady,
     ]
   );
 

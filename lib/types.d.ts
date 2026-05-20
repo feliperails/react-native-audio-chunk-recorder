@@ -39,6 +39,12 @@ export interface MaxDurationReachedData {
     maxDuration: number;
     chunks: ChunkData[];
 }
+export interface FullRecordingData {
+    path: string;
+    timestamp: number;
+    size: number;
+    durationSeconds: number;
+}
 export interface AudioLevelData {
     level: number;
     hasAudio: boolean;
@@ -82,6 +88,7 @@ export interface AudioRecorderCoreOptions {
     onInterruption?: (interruption: InterruptionData) => void;
     onStateChange?: (state: StateChangeData) => void;
     onMaxDurationReached?: (data: MaxDurationReachedData) => void;
+    onFullRecordingReady?: (data: FullRecordingData) => void;
 }
 export interface AudioRecorderCoreReturn {
     service: any | null;
@@ -112,4 +119,5 @@ export interface AudioRecorderCoreReturn {
     onInterruption: (callback: (interruption: InterruptionData) => void) => () => void;
     onStateChange: (callback: (state: StateChangeData) => void) => () => void;
     onMaxDurationReached: (callback: (data: MaxDurationReachedData) => void) => () => void;
+    onFullRecordingReady: (callback: (data: FullRecordingData) => void) => () => void;
 }
