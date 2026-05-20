@@ -85,14 +85,19 @@ public class EventEmitter {
      * Send chunk event with complete chunk information
      */
     public void sendChunkEvent(int chunkIndex, String path, long timestamp, long size) {
+        sendChunkEvent(chunkIndex, path, timestamp, size, false);
+    }
+
+    public void sendChunkEvent(int chunkIndex, String path, long timestamp, long size, boolean isLastChunk) {
         WritableMap map = Arguments.createMap();
         map.putInt("sequence", chunkIndex); // Use "sequence" to match ChunkData interface
         map.putString("path", path);
         map.putDouble("timestamp", timestamp);
         map.putDouble("size", size);
+        map.putBoolean("isLastChunk", isLastChunk);
         sendEvent("onChunkReady", map);
-        
-        Log.d(TAG, "📤 CHUNK EVENT SENT: sequence=" + chunkIndex + ", path=" + path + ", size=" + size);
+
+        Log.d(TAG, "📤 CHUNK EVENT SENT: sequence=" + chunkIndex + ", path=" + path + ", size=" + size + ", isLastChunk=" + isLastChunk);
     }
 
     /**

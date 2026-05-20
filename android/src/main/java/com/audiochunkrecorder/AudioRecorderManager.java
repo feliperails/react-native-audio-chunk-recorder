@@ -580,7 +580,7 @@ public class AudioRecorderManager {
                 String chunkPath = fileManager.saveChunkToFile(audioData, finishedChunkIndex, chunkSampleRate);
                 if (chunkPath != null) {
                     Log.d(TAG, "✅ EMITTING CHUNK EVENT: chunkIndex=" + finishedChunkIndex + ", path=" + chunkPath);
-                    eventEmitter.sendChunkEvent(finishedChunkIndex, chunkPath, finishedChunkStartTime, chunkSize);
+                    eventEmitter.sendChunkEvent(finishedChunkIndex, chunkPath, finishedChunkStartTime, chunkSize, isStoppingRecording);
                 } else {
                     Log.e(TAG, "❌ FAILED TO SAVE CHUNK: chunkIndex=" + finishedChunkIndex);
                     eventEmitter.sendErrorEvent("Failed to save chunk " + finishedChunkIndex);
