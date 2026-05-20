@@ -15,6 +15,8 @@ export type {
   AudioRecorderCoreOptions,
   AudioRecorderCoreReturn,
   ChunkData,
+  FullRecordingData,
+  MaxDurationReachedData,
   ErrorData,
   InterruptionData,
   StateChangeData,

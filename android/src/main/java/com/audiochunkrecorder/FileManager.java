@@ -103,6 +103,25 @@ public class FileManager {
     }
 
     /**
+     * Save the full session recording (continuous PCM) as a single WAV file.
+     */
+    public String saveFullRecordingToFile(byte[] audioData, int sampleRate) {
+        if (audioData == null || audioData.length == 0) {
+            Log.w(TAG, "Cannot save full recording: audio data is null or empty");
+            return null;
+        }
+        try {
+            String fileName = "full_" + System.currentTimeMillis() + ".wav";
+            File fullFile = new File(recordingDirectory, fileName);
+            writeWavFile(fullFile, audioData, sampleRate);
+            return fullFile.getAbsolutePath();
+        } catch (IOException e) {
+            Log.e(TAG, "Error saving full recording: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Clear all chunk files
      */
     public int clearAllChunkFiles() {

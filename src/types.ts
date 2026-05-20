@@ -56,6 +56,13 @@ export interface MaxDurationReachedData {
   chunks: ChunkData[];
 }
 
+export interface FullRecordingData {
+  path: string; // File system path of the single continuous WAV file
+  timestamp: number; // Recording start timestamp (ms since epoch)
+  size: number; // File size in bytes
+  durationSeconds: number; // Total recording duration in seconds
+}
+
 export interface AudioLevelData {
   level: number;
   hasAudio: boolean;
@@ -114,6 +121,7 @@ export interface AudioRecorderCoreOptions {
   onInterruption?: (interruption: InterruptionData) => void;
   onStateChange?: (state: StateChangeData) => void;
   onMaxDurationReached?: (data: MaxDurationReachedData) => void;
+  onFullRecordingReady?: (data: FullRecordingData) => void;
 }
 
 // ===== HOOK RETURN TYPES =====
@@ -163,5 +171,8 @@ export interface AudioRecorderCoreReturn {
   onStateChange: (callback: (state: StateChangeData) => void) => () => void;
   onMaxDurationReached: (
     callback: (data: MaxDurationReachedData) => void
+  ) => () => void;
+  onFullRecordingReady: (
+    callback: (data: FullRecordingData) => void
   ) => () => void;
 }

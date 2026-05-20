@@ -1,5 +1,5 @@
 import { NativeEventEmitter } from "react-native";
-import type { RecordingOptions, ChunkData, ErrorData, StateChangeData, AudioLevelData, InterruptionData } from "./types";
+import type { RecordingOptions, ChunkData, ErrorData, StateChangeData, AudioLevelData, InterruptionData, FullRecordingData } from "./types";
 export interface NativeAudioChunkRecorderInterface {
     startRecording(options: RecordingOptions): Promise<string>;
     stopRecording(): Promise<string>;
@@ -20,5 +20,6 @@ export interface AudioChunkRecorderEvents {
     onStateChange: (state: StateChangeData) => void;
     onAudioLevel: (levelData: AudioLevelData) => void;
     onInterruption: (interruption: InterruptionData) => void;
+    onFullRecordingReady: (data: FullRecordingData) => void;
 }
 export type AudioChunkRecorderEventType = keyof AudioChunkRecorderEvents;
