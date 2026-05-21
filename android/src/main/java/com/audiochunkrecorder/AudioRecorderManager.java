@@ -102,6 +102,21 @@ public class AudioRecorderManager {
         }
 
         audioRecord.startRecording();
+
+        // AudioRecord may silently fall back to a hardware-supported rate
+        // (e.g. requested 44100 → granted 48000). Trust the granted rate
+        // for both the WAV header and chunk slicing, otherwise tagged-vs-
+        // actual rate mismatch stretches playback length (60s → ~65s when
+        // 44100 is written into a header for 48000 samples).
+        int grantedRate = audioRecord.getSampleRate();
+        if (grantedRate > 0 && grantedRate != sampleRate) {
+            Log.w(TAG, "Requested sampleRate=" + sampleRate + " but hardware granted " + grantedRate);
+            this.currentSampleRate = grantedRate;
+            if (!levelMonitoring) {
+                this.chunkSizeBytes = (long) (grantedRate * BYTES_PER_SAMPLE * chunkDuration);
+            }
+        }
+
         isRecording = true;
         isPaused = false;
 
@@ -345,11 +360,8 @@ public class AudioRecorderManager {
                 int leftover = all.length - head.length;
                 chunkBuffer.reset();
                 if (leftover > 0) {
-                    try {
-                        chunkBuffer.write(all, head.length, leftover);
-                    } catch (IOException e) {
-                        Log.e(TAG, "Error preserving chunk leftover: " + e.getMessage());
-                    }
+                    // ByteArrayOutputStream.write(byte[], int, int) does not throw.
+                    chunkBuffer.write(all, head.length, leftover);
                 }
 
                 int idx = currentChunkIndex.getAndIncrement();
