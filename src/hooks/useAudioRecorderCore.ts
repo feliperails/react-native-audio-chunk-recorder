@@ -109,8 +109,7 @@ class EventListenerManager {
     const chunkListener = AudioChunkRecorderEventEmitter.addListener(
       "onChunkReady",
       (chunk: ChunkData) => {
-        // Use setTimeout to defer chunk processing and avoid blocking audio level updates
-        setTimeout(() => {
+        const dispatch = () => {
           this.notifyListeners("onChunkReady", chunk);
           options.onChunkReady?.(chunk);
 
@@ -129,7 +128,23 @@ class EventListenerManager {
               );
             });
           }
-        }, 0); // Defer to next tick to prioritize audio level
+        };
+
+        // Non-final chunks are deferred to next tick to keep audio-level
+        // updates smooth during ongoing capture. The FINAL chunk must dispatch
+        // synchronously: native emits onChunkReady(isLast:YES) immediately
+        // followed by onMaxDurationReached, whose handler runs synchronously
+        // (no setTimeout) and tears down consumer state (e.g. clears the
+        // requestId the chunk uploader needs). If we defer the final chunk
+        // too, that teardown wins the race and the final chunk is dropped —
+        // server never receives isFinal=true and the recording never
+        // finalizes. Recording has ended at this point, so the audio-level
+        // priority concern no longer applies.
+        if (chunk.isLastChunk === true) {
+          dispatch();
+        } else {
+          setTimeout(dispatch, 0);
+        }
       }
     );
 
