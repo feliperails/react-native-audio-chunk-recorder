@@ -1,6 +1,6 @@
 {
   "name": "@asolerp/react-native-audio-chunk-recorder",
-  "version": "0.3.21",
+  "version": "0.3.22",
   "description": "React Native audio recording with chunking support",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

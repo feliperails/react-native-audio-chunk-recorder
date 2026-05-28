@@ -41,7 +41,7 @@ RCT_EXPORT_MODULE();
 }
 
 - (NSArray<NSString *> *)supportedEvents {
-    return @[@"onChunkReady", @"onError", @"onAudioLevel", @"onInterruption", @"onStateChange", @"onMaxDurationReached"];
+    return @[@"onChunkReady", @"onError", @"onAudioLevel", @"onInterruption", @"onStateChange", @"onMaxDurationReached", @"onFullRecordingReady"];
 }
 
 #pragma mark - Public API
