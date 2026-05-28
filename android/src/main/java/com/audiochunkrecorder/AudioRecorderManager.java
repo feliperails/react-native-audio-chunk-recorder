@@ -42,6 +42,15 @@ public class AudioRecorderManager {
     private int currentSampleRate = 16000;
     private long chunkSizeBytes = 0; // bytes per chunk based on sampleRate * chunkDuration
 
+    // Native max-duration enforcement. iOS has its own dispatch_source_t-based
+    // tracker; Android historically relied on a JS setInterval which freezes
+    // alongside the bridge in background. We mirror iOS here by counting PCM
+    // bytes against a precomputed ceiling.
+    private double maxDurationSeconds = 0;
+    private long maxDurationBytes = 0; // 0 = unlimited
+    private final java.util.concurrent.atomic.AtomicLong totalBytesRecorded =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
     private long recordingStartTime = 0;
     private long currentChunkStartTime = 0;
 
@@ -63,7 +72,7 @@ public class AudioRecorderManager {
      *                PUBLIC API
      * ============================================================== */
 
-    public void startRecording(int sampleRate, double chunkDuration) throws Exception {
+    public void startRecording(int sampleRate, double chunkDuration, double maxDurationSeconds) throws Exception {
         if (isRecording) {
             throw new IllegalStateException("Recording is already in progress");
         }
@@ -75,10 +84,17 @@ public class AudioRecorderManager {
                 ? 0
                 : (long) (sampleRate * BYTES_PER_SAMPLE * chunkDuration);
         this.isAudioLevelMonitoring = levelMonitoring;
+        this.maxDurationSeconds = maxDurationSeconds;
+        this.maxDurationBytes = (maxDurationSeconds > 0 && !levelMonitoring)
+                ? (long) (sampleRate * BYTES_PER_SAMPLE * maxDurationSeconds)
+                : 0;
+        this.totalBytesRecorded.set(0);
 
         Log.d(TAG, "startRecording sampleRate=" + sampleRate
                 + " chunkDuration=" + chunkDuration
                 + " chunkSizeBytes=" + chunkSizeBytes
+                + " maxDurationSeconds=" + maxDurationSeconds
+                + " maxDurationBytes=" + maxDurationBytes
                 + " levelMonitoring=" + levelMonitoring);
 
         if (currentChunkIndex.get() == 0) {
@@ -114,6 +130,9 @@ public class AudioRecorderManager {
             this.currentSampleRate = grantedRate;
             if (!levelMonitoring) {
                 this.chunkSizeBytes = (long) (grantedRate * BYTES_PER_SAMPLE * chunkDuration);
+                if (maxDurationSeconds > 0) {
+                    this.maxDurationBytes = (long) (grantedRate * BYTES_PER_SAMPLE * maxDurationSeconds);
+                }
             }
         }
 
@@ -318,6 +337,26 @@ public class AudioRecorderManager {
 
                 if (isRecording && !isAudioLevelMonitoring) {
                     appendPcmAndMaybeRotate(pcm);
+
+                    // Native max-duration enforcement — don't rely on the JS
+                    // setInterval in the hook, it freezes when the OS suspends
+                    // the JS thread in background.
+                    if (maxDurationBytes > 0) {
+                        long total = totalBytesRecorded.addAndGet(pcm.length);
+                        if (total >= maxDurationBytes) {
+                            final double elapsedSeconds =
+                                    (double) total / (BYTES_PER_SAMPLE * currentSampleRate);
+                            final double cap = maxDurationSeconds;
+                            // Stop on a different thread so the join inside
+                            // stopRecording() doesn't deadlock against this
+                            // executor thread.
+                            new Thread(() -> {
+                                stopRecording();
+                                eventEmitter.sendMaxDurationReachedEvent(elapsedSeconds, cap);
+                            }, "audio-auto-stop").start();
+                            break;
+                        }
+                    }
                 }
 
                 // Audio level (recording or preview).

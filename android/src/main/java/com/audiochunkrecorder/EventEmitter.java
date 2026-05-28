@@ -114,4 +114,17 @@ public class EventEmitter {
     public void sendInterruptionEvent(WritableMap interruptionData) {
         sendEvent("onInterruption", interruptionData);
     }
-} 
+
+    /**
+     * Emitted when native max-duration enforcement decides the session has
+     * reached the configured ceiling. Mirrors the iOS event shape so the JS
+     * hook's existing onMaxDurationReached listener catches both.
+     */
+    public void sendMaxDurationReachedEvent(double duration, double maxDuration) {
+        WritableMap map = Arguments.createMap();
+        map.putDouble("duration", duration);
+        map.putDouble("maxDuration", maxDuration);
+        map.putArray("chunks", Arguments.createArray());
+        sendEvent("onMaxDurationReached", map);
+    }
+}

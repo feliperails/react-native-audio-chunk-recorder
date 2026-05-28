@@ -114,8 +114,13 @@ public class AudioChunkRecorderModule extends ReactContextBaseJavaModule {
         try {
             int sampleRate = options.hasKey("sampleRate") ? options.getInt("sampleRate") : 16000;
             double chunkDuration = options.hasKey("chunkSeconds") ? options.getDouble("chunkSeconds") : 30.0;
-            
-            recorderManager.startRecording(sampleRate, chunkDuration);
+            // Mirror iOS: 0/absent means "no native max-duration enforcement",
+            // anything > 0 caps the session at that many seconds. The JS hook
+            // sends "maxRecordingDuration"; iOS already reads the same key.
+            double maxDuration = options.hasKey("maxRecordingDuration")
+                    ? options.getDouble("maxRecordingDuration") : 0.0;
+
+            recorderManager.startRecording(sampleRate, chunkDuration, maxDuration);
             promise.resolve("Recording started");
         } catch (Exception e) {
             Log.e(TAG, "Failed to start recording", e);
