@@ -854,32 +854,49 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     if (!self.isRecording) {
         return;
     }
-    
+
+    // Latch isRecording synchronously BEFORE anything else. The chunk
+    // rotation timer (`self.timer`) and this maxDurationTimer both live on
+    // DISPATCH_QUEUE_PRIORITY_DEFAULT — a *concurrent* global queue — so
+    // when maxRecordingDuration is an exact multiple of chunkSeconds (e.g.
+    // 60s / 5s) the rotation timer fires at the same instant as us and
+    // can race startNextChunk on another core. Setting this flag
+    // synchronously makes `startNextChunk`'s `if (!self.isRecording)`
+    // guard bail out instead of rotating into a new empty chunk that
+    // would then shadow the real final chunk path/recorder.
+    self.isRecording = NO;
+
+    // Cancel the rotation timer immediately for the same reason — even if
+    // it has already fired and is queued, killing the source here makes
+    // any not-yet-dispatched handler a no-op.
+    if (self.timer) {
+        dispatch_source_cancel(self.timer);
+        self.timer = nil;
+    }
+
     NSLog(@"AudioChunkRecorder: Max duration reached, stopping recording");
-    
+
     // Calculate total recording duration
     NSTimeInterval totalDuration = [NSDate timeIntervalSinceReferenceDate] - self.recordingStartTime;
-    
-    // ✅ FIXED: Only update state on main queue, rest can be on background
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.isRecording = NO;
         [self emitStateChange];
     });
-    
+
     // Clean up (can be done on background)
     [self removeAudioSessionNotifications];
     [self stopAudioLevelMonitoring];
     [self stopMaxDurationTracking];
     [self finishCurrentChunk:YES]; // Mark as last chunk
-    
+
     // Emit max duration reached event
     NSDictionary *maxDurationData = @{
         @"duration": @(totalDuration),
         @"maxDuration": @(self.maxRecordingDuration)
     };
-    
+
     [self sendEventWithName:@"onMaxDurationReached" body:maxDurationData];
-    
+
     [self resetState];
 }
 
