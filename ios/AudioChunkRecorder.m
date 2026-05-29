@@ -118,14 +118,10 @@ RCT_EXPORT_METHOD(stopRecording:(RCTPromiseResolveBlock)resolve
     [self removeAudioSessionNotifications];
     [self stopAudioLevelMonitoring];
     [self stopMaxDurationTracking];
-    // Emit the current chunk as non-final, then a synthetic terminator chunk.
-    // Decouples "this is the last audio data" from "the session is over": even
-    // if mid-session rotations failed and produced empty/broken chunks, the
-    // terminator reliably tells the server to finalize. Both emits are
-    // synchronous so the bridge delivers them to JS before the consumer's
-    // completion callback runs and tears down upload state.
-    [self finishCurrentChunk:NO synchronous:YES];
-    [self emitTerminatorChunk];
+    // Mark the current chunk as the final one and bridge it synchronously
+    // so JS receives onChunkReady before the consumer's completion callback
+    // tears down upload state.
+    [self finishCurrentChunk:YES synchronous:YES];
     [self resetState];
 
     resolve(@"Recording stopped");
@@ -940,10 +936,10 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     [self removeAudioSessionNotifications];
     [self stopAudioLevelMonitoring];
     [self stopMaxDurationTracking];
-    // Emit the current chunk as non-final, then a synthetic terminator.
-    // See stopRecording: above for the rationale.
-    [self finishCurrentChunk:NO synchronous:YES];
-    [self emitTerminatorChunk];
+    // Mark the current chunk as the final one and bridge it synchronously
+    // so JS receives onChunkReady before the consumer's completion callback
+    // runs. See stopRecording: above for the rationale.
+    [self finishCurrentChunk:YES synchronous:YES];
 
     // Emit max duration reached event
     NSDictionary *maxDurationData = @{
@@ -994,75 +990,6 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
                                          code:code
                                      userInfo:@{NSLocalizedDescriptionKey: message}];
     [self emitError:error];
-}
-
-#pragma mark - Terminator Chunk
-
-// Synthesizes a 44-byte minimal-valid WAV (RIFF header + fmt chunk + empty data
-// chunk) at the session's current sample rate. The backend's IsRiffWaveAsync
-// validator passes; NAudio's WaveFileReader reads 0 samples and the merger
-// adds nothing to the output. Emitted as the final chunk so the server's
-// "isFinal -> MergeAndFinalizeAudioAsync" path always fires, even if the
-// preceding real chunk was incomplete (rotation failure, audio session
-// deactivated under lock, etc).
-- (NSData *)buildMinimalWavData {
-    uint32_t sampleRate = (uint32_t)self.sampleRate;
-    uint16_t numChannels = 1;
-    uint16_t bitsPerSample = 16;
-    uint32_t byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-    uint16_t blockAlign = numChannels * (bitsPerSample / 8);
-    uint32_t dataSize = 0;
-    uint32_t chunkSize = 36 + dataSize;
-    uint32_t subchunk1Size = 16;
-    uint16_t audioFormat = 1; // PCM
-
-    NSMutableData *data = [NSMutableData dataWithCapacity:44];
-    [data appendBytes:"RIFF" length:4];
-    [data appendBytes:&chunkSize length:4];
-    [data appendBytes:"WAVE" length:4];
-    [data appendBytes:"fmt " length:4];
-    [data appendBytes:&subchunk1Size length:4];
-    [data appendBytes:&audioFormat length:2];
-    [data appendBytes:&numChannels length:2];
-    [data appendBytes:&sampleRate length:4];
-    [data appendBytes:&byteRate length:4];
-    [data appendBytes:&blockAlign length:2];
-    [data appendBytes:&bitsPerSample length:2];
-    [data appendBytes:"data" length:4];
-    [data appendBytes:&dataSize length:4];
-    return data;
-}
-
-- (void)emitTerminatorChunk {
-    NSInteger terminatorSeq = self.seq + 1;
-    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *fileName = [NSString stringWithFormat:@"chunk_%04ld.wav", (long)terminatorSeq];
-    NSString *filePath = [docs stringByAppendingPathComponent:fileName];
-
-    NSData *wavData = [self buildMinimalWavData];
-    NSError *writeError = nil;
-    if (![wavData writeToFile:filePath options:NSDataWritingAtomic error:&writeError]) {
-        NSLog(@"AudioChunkRecorder: Failed to write terminator chunk: %@",
-              writeError.localizedDescription);
-        return;
-    }
-
-    NSTimeInterval timestampMs = [NSDate timeIntervalSinceReferenceDate] * 1000;
-    NSDictionary *chunkData = @{
-        @"path": filePath,
-        @"sequence": @(terminatorSeq),
-        @"timestamp": @(timestampMs),
-        @"size": @(wavData.length),
-        @"isLastChunk": @YES
-    };
-
-    NSLog(@"AudioChunkRecorder: 🎯 EMITTING TERMINATOR CHUNK - seq: %ld, size: %lu bytes, isLast: YES",
-          (long)terminatorSeq, (unsigned long)wavData.length);
-
-    // Synchronous on the caller's thread — must reach JS before the caller
-    // (stopRecording / handleMaxDurationReached) emits onMaxDurationReached
-    // / state teardown and the consumer clears the upload-session requestId.
-    [self sendEventWithName:@"onChunkReady" body:chunkData];
 }
 
 @end
