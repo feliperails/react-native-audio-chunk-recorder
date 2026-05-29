@@ -439,10 +439,23 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     [self finishCurrentChunk:NO synchronous:NO];
 }
 
-// `synchronous=YES` is required on the teardown path (stopRecording /
-// handleMaxDurationReached) so the chunk reaches JS BEFORE the consumer's
-// completion callback tears down upload state. Async on the rotation path
-// keeps audio-level monitoring smooth.
+// `synchronous=YES` controls how the chunk EVENT is delivered to JS:
+// synchronous on the teardown path so the chunk reaches JS BEFORE the
+// consumer's completion callback tears down upload state, deferred to a
+// low-priority queue on the rotation path so audio-level monitoring stays
+// smooth.
+//
+// The AVAudioRecorder STOP is always synchronous regardless. Async-stopping
+// on the rotation path caused two races on real iOS devices (especially in
+// background under screen lock):
+//   1) The new AVAudioRecorder in beginRecording was allocated before the
+//      old one released the audio HW — record: returned NO and the rotation
+//      failed, cutting the session short at a 5s boundary.
+//   2) The file-size read inside emitChunkBlock ran concurrently with the
+//      not-yet-completed stop on the same PRIORITY_LOW queue, so the file
+//      was read before AVAudioRecorder flushed its final write.
+// Audio-level smoothness during rotation is a minor cosmetic concern;
+// reliable capture wins.
 - (void)finishCurrentChunk:(BOOL)isLastChunk synchronous:(BOOL)synchronous {
     AVAudioRecorder *currentRecorder = self.recorder;
 
@@ -452,17 +465,8 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     NSInteger chunkSeq = self.seq;
     NSTimeInterval chunkStartTimestamp = self.chunkStartTime;
 
-    // Stop the recorder synchronously when we need the WAV flushed to disk
-    // before we read its size in the emit block below. Async-stopping on a
-    // teardown path produces 0-byte reads that fail the size>0 guard.
     if (currentRecorder) {
-        if (synchronous) {
-            [currentRecorder stop];
-        } else {
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-                [currentRecorder stop];
-            });
-        }
+        [currentRecorder stop];
     }
 
     if (!filePath) {
