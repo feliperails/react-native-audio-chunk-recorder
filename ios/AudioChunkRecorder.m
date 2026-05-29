@@ -41,6 +41,10 @@ RCT_EXPORT_MODULE();
 }
 
 - (NSArray<NSString *> *)supportedEvents {
+    // onFullRecordingReady is declared by the JS hook but never emitted on iOS
+    // (Android emits it after stopRecording's flushFinalChunk). Keeping the
+    // entry here prevents the React Native bridge from crashing the iOS hook
+    // when it subscribes — emission is intentionally absent on this platform.
     return @[@"onChunkReady", @"onError", @"onAudioLevel", @"onInterruption", @"onStateChange", @"onMaxDurationReached", @"onFullRecordingReady"];
 }
 
@@ -105,18 +109,25 @@ RCT_EXPORT_METHOD(stopRecording:(RCTPromiseResolveBlock)resolve
     }
 
     self.isRecording = NO;
-    
+
     // Emit state change event immediately after stopping
     [self emitStateChange];
-    
-    self.interruptionEventSent = NO; // Reset for next recording session
-    self.lastInterruptionEndTime = 0; // Reset for next recording session
+
+    self.interruptionEventSent = NO;
+    self.lastInterruptionEndTime = 0;
     [self removeAudioSessionNotifications];
     [self stopAudioLevelMonitoring];
-    [self stopMaxDurationTracking]; // Stop max duration tracking
-    [self finishCurrentChunk:YES]; // Mark as last chunk
+    [self stopMaxDurationTracking];
+    // Emit the current chunk as non-final, then a synthetic terminator chunk.
+    // Decouples "this is the last audio data" from "the session is over": even
+    // if mid-session rotations failed and produced empty/broken chunks, the
+    // terminator reliably tells the server to finalize. Both emits are
+    // synchronous so the bridge delivers them to JS before the consumer's
+    // completion callback runs and tears down upload state.
+    [self finishCurrentChunk:NO synchronous:YES];
+    [self emitTerminatorChunk];
     [self resetState];
-    
+
     resolve(@"Recording stopped");
 }
 
@@ -330,9 +341,24 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
 
 // Initializes and starts AVAudioRecorder with minimal impact on audio level monitoring
 - (BOOL)beginRecording:(NSError **)outError {
+    // Re-activate the audio session before each chunk. iOS can deactivate
+    // PlayAndRecord sessions when the screen locks (even with
+    // UIBackgroundModes=audio set) and the next AVAudioRecorder record:
+    // call will return NO. Calling setActive:YES is idempotent when the
+    // session is already active. Failures here are benign — we still try to
+    // begin recording and let that surface the real error.
+    {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        NSError *reactivateError = nil;
+        if (![session setActive:YES error:&reactivateError]) {
+            NSLog(@"AudioChunkRecorder: setActive:YES before beginRecording failed: %@",
+                  reactivateError.localizedDescription);
+        }
+    }
+
     NSURL *fileURL = [self nextFileURL];
     self.currentFilePath = fileURL.path;
-    
+
     // Reset timing for new chunk
     self.chunkStartTime = [NSDate timeIntervalSinceReferenceDate];
     self.accumulatedRecordingTime = 0.0;
@@ -412,32 +438,29 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     // Timer scheduled for next chunk rotation
 }
 
-// Stops recorder, verifies file, and emits event with file info
+// Default: non-final, async (rotation path during ongoing capture).
 - (void)finishCurrentChunk {
-    [self finishCurrentChunk:NO];
+    [self finishCurrentChunk:NO synchronous:NO];
 }
 
-- (void)finishCurrentChunk:(BOOL)isLastChunk {
-    // Capture current recorder reference for smooth handoff
+// `synchronous=YES` is required on the teardown path (stopRecording /
+// handleMaxDurationReached) so the chunk reaches JS BEFORE the consumer's
+// completion callback tears down upload state. Async on the rotation path
+// keeps audio-level monitoring smooth.
+- (void)finishCurrentChunk:(BOOL)isLastChunk synchronous:(BOOL)synchronous {
     AVAudioRecorder *currentRecorder = self.recorder;
 
-    // FIXED: Capture the file path and seq in local variables to avoid race conditions
+    // Capture per-chunk state up front — rotation may reassign these
+    // properties while the emit block is still running on a background queue.
     NSString *filePath = self.currentFilePath;
     NSInteger chunkSeq = self.seq;
     NSTimeInterval chunkStartTimestamp = self.chunkStartTime;
 
-    // For the FINAL chunk we MUST stop the recorder synchronously so the file
-    // is flushed to disk before we read its size below, AND the chunk event is
-    // bridged to JS BEFORE the caller (handleMaxDurationReached / stopRecording)
-    // sends onMaxDurationReached or otherwise tears down session state.
-    // Deferring the stop/emit on PRIORITY_LOW for the final chunk causes JS to
-    // receive onMaxDurationReached first, clear the upload-session requestId,
-    // then drop the final chunk when it finally arrives — so the server never
-    // sees isFinal=true and the record stays "Processando…" forever.
-    // For non-final rotations, keep the deferred path so audio-level monitoring
-    // stays smooth across the rotation.
+    // Stop the recorder synchronously when we need the WAV flushed to disk
+    // before we read its size in the emit block below. Async-stopping on a
+    // teardown path produces 0-byte reads that fail the size>0 guard.
     if (currentRecorder) {
-        if (isLastChunk) {
+        if (synchronous) {
             [currentRecorder stop];
         } else {
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
@@ -451,64 +474,57 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
         return;
     }
 
-    // Calculate actual chunk duration
     NSTimeInterval chunkEndTime = [NSDate timeIntervalSinceReferenceDate];
     NSTimeInterval actualDuration = self.accumulatedRecordingTime + (chunkEndTime - self.chunkStartTime);
 
-    NSLog(@"AudioChunkRecorder: Finishing chunk %ld at path: %@, isLast: %@", (long)chunkSeq, filePath, isLastChunk ? @"YES" : @"NO");
+    NSLog(@"AudioChunkRecorder: Finishing chunk %ld at path: %@, isLast: %@, sync: %@",
+          (long)chunkSeq, filePath,
+          isLastChunk ? @"YES" : @"NO",
+          synchronous ? @"YES" : @"NO");
 
     void (^emitChunkBlock)(void) = ^{
         NSFileManager *fm = [NSFileManager defaultManager];
-        if ([fm fileExistsAtPath:filePath]) {
-            NSDictionary *attributes = [fm attributesOfItemAtPath:filePath error:nil];
-            NSNumber *size = attributes[NSFileSize];
-            NSLog(@"AudioChunkRecorder: File exists, size: %@ bytes", size);
-            if (size.unsignedLongLongValue > 0) {
-                NSLog(@"AudioChunkRecorder: 🎯 EMITTING CHUNK TO FRONTEND - seq: %ld, path: %@, size: %@ bytes, isLast: %@", (long)chunkSeq, filePath, size, isLastChunk ? @"YES" : @"NO");
-
-                NSTimeInterval timestampMs = chunkStartTimestamp * 1000;
-
-                NSDictionary *chunkData = @{
-                    @"path": filePath,
-                    @"sequence": @(chunkSeq),
-                    @"timestamp": @(timestampMs),
-                    @"size": size,
-                    @"isLastChunk": @(isLastChunk)
-                };
-
-                NSLog(@"AudioChunkRecorder: 📤 Event data: %@", chunkData);
-
-                if (isLastChunk) {
-                    // Bridge synchronously so onChunkReady reaches JS BEFORE the
-                    // caller emits onMaxDurationReached / clears session state.
-                    [self sendEventWithName:@"onChunkReady" body:chunkData];
-                    NSLog(@"AudioChunkRecorder: ✅ Event sent successfully for chunk %ld", (long)chunkSeq);
-                } else {
-                    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-                        [self sendEventWithName:@"onChunkReady" body:chunkData];
-                        NSLog(@"AudioChunkRecorder: ✅ Event sent successfully for chunk %ld", (long)chunkSeq);
-                    });
-                }
-            } else {
-                NSLog(@"AudioChunkRecorder: ❌ File is empty");
-                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-                    [self emitErrorWithCode:1007 message:@"Recorded file is empty"];
-                });
-            }
-        } else {
+        if (![fm fileExistsAtPath:filePath]) {
             NSLog(@"AudioChunkRecorder: ❌ File does not exist at path: %@", filePath);
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
                 [self emitErrorWithCode:1008 message:@"Recorded file was not created"];
             });
+            return;
+        }
+        NSDictionary *attributes = [fm attributesOfItemAtPath:filePath error:nil];
+        NSNumber *size = attributes[NSFileSize];
+        if (size.unsignedLongLongValue == 0) {
+            NSLog(@"AudioChunkRecorder: ❌ File is empty: %@", filePath);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [self emitErrorWithCode:1007 message:@"Recorded file is empty"];
+            });
+            return;
+        }
+
+        NSTimeInterval timestampMs = chunkStartTimestamp * 1000;
+        NSDictionary *chunkData = @{
+            @"path": filePath,
+            @"sequence": @(chunkSeq),
+            @"timestamp": @(timestampMs),
+            @"size": size,
+            @"isLastChunk": @(isLastChunk)
+        };
+
+        NSLog(@"AudioChunkRecorder: 🎯 EMITTING CHUNK TO FRONTEND - seq: %ld, size: %@ bytes, isLast: %@",
+              (long)chunkSeq, size, isLastChunk ? @"YES" : @"NO");
+
+        if (synchronous) {
+            [self sendEventWithName:@"onChunkReady" body:chunkData];
+        } else {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [self sendEventWithName:@"onChunkReady" body:chunkData];
+            });
         }
     };
 
-    if (isLastChunk) {
-        // Run the file-read + bridge-emit synchronously on the caller's thread.
+    if (synchronous) {
         emitChunkBlock();
     } else {
-        // Defer non-final emit to the low-priority queue so audio level updates
-        // stay smooth across chunk rotation.
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), emitChunkBlock);
     }
 }
@@ -530,14 +546,25 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     
     if (self.isRecording) {
         self.seq += 1;
-        
-        NSError *error;
+
+        NSError *error = nil;
         if (![self beginRecording:&error]) {
+            // Rotation failure is non-fatal — most commonly hit when iOS
+            // deactivates the audio session under a locked screen. Aborting
+            // the whole session here causes the user-visible "random recording
+            // length" bug (recording finalizes at the failed boundary, e.g.
+            // 30s or 55s instead of the full maxRecordingDuration). Surface
+            // the error to JS for visibility, then reschedule another
+            // rotation attempt so the next tick can recover once the session
+            // wakes up. handleMaxDurationReached will still finalize cleanly
+            // when maxDuration eventually fires.
+            NSLog(@"AudioChunkRecorder: Chunk rotation failed (will retry): %@",
+                  error.localizedDescription ?: @"unknown");
             [self emitError:error];
-            [self stopRecording:nil rejecter:nil];
+            [self scheduleRotation];
         } else {
             [self scheduleRotation];
-            
+
             // Ensure audio level monitoring continues uninterrupted
             if (wasMonitoringLevel && self.levelTimer == nil) {
                 [self startAudioLevelMonitoring];
@@ -913,7 +940,10 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     [self removeAudioSessionNotifications];
     [self stopAudioLevelMonitoring];
     [self stopMaxDurationTracking];
-    [self finishCurrentChunk:YES]; // Mark as last chunk
+    // Emit the current chunk as non-final, then a synthetic terminator.
+    // See stopRecording: above for the rationale.
+    [self finishCurrentChunk:NO synchronous:YES];
+    [self emitTerminatorChunk];
 
     // Emit max duration reached event
     NSDictionary *maxDurationData = @{
@@ -966,38 +996,73 @@ RCT_EXPORT_METHOD(clearAllChunkFiles:(RCTPromiseResolveBlock)resolve
     [self emitError:error];
 }
 
-// Rotates to a new chunk with optimized audio level continuity
-- (void)rotateChunk {
-    if (!self.isRecording) { 
-        return; 
-    }
-    
-    NSLog(@"AudioChunkRecorder: Rotating to new chunk with audio level continuity");
-    
-    // Preserve audio level monitoring state
-    BOOL shouldMaintainAudioLevel = (self.levelTimer != nil);
-    
-    // First, finish the current chunk
-    [self finishCurrentChunk:NO]; // Not the last chunk
-    
-    // Then start a new chunk immediately to minimize audio level gap
-    NSError *error = nil;
-    if (![self beginRecording:&error]) {
-        NSLog(@"AudioChunkRecorder: Failed to start new chunk: %@", error.localizedDescription);
-        [self emitErrorWithCode:1009 message:@"Failed to start new chunk"];
-        return;
-    }
-    
-    // Increment sequence number after successful start
-    self.seq += 1;
-    
-    // Ensure audio level monitoring continues uninterrupted
-    if (shouldMaintainAudioLevel && self.levelTimer == nil) {
-        [self startAudioLevelMonitoring];
-    }
-    
-    // Schedule the next rotation
-    [self scheduleRotation];
+#pragma mark - Terminator Chunk
+
+// Synthesizes a 44-byte minimal-valid WAV (RIFF header + fmt chunk + empty data
+// chunk) at the session's current sample rate. The backend's IsRiffWaveAsync
+// validator passes; NAudio's WaveFileReader reads 0 samples and the merger
+// adds nothing to the output. Emitted as the final chunk so the server's
+// "isFinal -> MergeAndFinalizeAudioAsync" path always fires, even if the
+// preceding real chunk was incomplete (rotation failure, audio session
+// deactivated under lock, etc).
+- (NSData *)buildMinimalWavData {
+    uint32_t sampleRate = (uint32_t)self.sampleRate;
+    uint16_t numChannels = 1;
+    uint16_t bitsPerSample = 16;
+    uint32_t byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    uint16_t blockAlign = numChannels * (bitsPerSample / 8);
+    uint32_t dataSize = 0;
+    uint32_t chunkSize = 36 + dataSize;
+    uint32_t subchunk1Size = 16;
+    uint16_t audioFormat = 1; // PCM
+
+    NSMutableData *data = [NSMutableData dataWithCapacity:44];
+    [data appendBytes:"RIFF" length:4];
+    [data appendBytes:&chunkSize length:4];
+    [data appendBytes:"WAVE" length:4];
+    [data appendBytes:"fmt " length:4];
+    [data appendBytes:&subchunk1Size length:4];
+    [data appendBytes:&audioFormat length:2];
+    [data appendBytes:&numChannels length:2];
+    [data appendBytes:&sampleRate length:4];
+    [data appendBytes:&byteRate length:4];
+    [data appendBytes:&blockAlign length:2];
+    [data appendBytes:&bitsPerSample length:2];
+    [data appendBytes:"data" length:4];
+    [data appendBytes:&dataSize length:4];
+    return data;
 }
 
-@end 
+- (void)emitTerminatorChunk {
+    NSInteger terminatorSeq = self.seq + 1;
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *fileName = [NSString stringWithFormat:@"chunk_%04ld.wav", (long)terminatorSeq];
+    NSString *filePath = [docs stringByAppendingPathComponent:fileName];
+
+    NSData *wavData = [self buildMinimalWavData];
+    NSError *writeError = nil;
+    if (![wavData writeToFile:filePath options:NSDataWritingAtomic error:&writeError]) {
+        NSLog(@"AudioChunkRecorder: Failed to write terminator chunk: %@",
+              writeError.localizedDescription);
+        return;
+    }
+
+    NSTimeInterval timestampMs = [NSDate timeIntervalSinceReferenceDate] * 1000;
+    NSDictionary *chunkData = @{
+        @"path": filePath,
+        @"sequence": @(terminatorSeq),
+        @"timestamp": @(timestampMs),
+        @"size": @(wavData.length),
+        @"isLastChunk": @YES
+    };
+
+    NSLog(@"AudioChunkRecorder: 🎯 EMITTING TERMINATOR CHUNK - seq: %ld, size: %lu bytes, isLast: YES",
+          (long)terminatorSeq, (unsigned long)wavData.length);
+
+    // Synchronous on the caller's thread — must reach JS before the caller
+    // (stopRecording / handleMaxDurationReached) emits onMaxDurationReached
+    // / state teardown and the consumer clears the upload-session requestId.
+    [self sendEventWithName:@"onChunkReady" body:chunkData];
+}
+
+@end

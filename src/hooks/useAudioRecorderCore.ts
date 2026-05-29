@@ -105,45 +105,36 @@ class EventListenerManager {
     // Clear existing listeners
     this.cleanup();
 
-    // Chunk ready listener with low priority to avoid interfering with audio level
+    // Dispatch chunks synchronously on the bridge thread. The audio-level
+    // priority concern that motivated an earlier setTimeout(0) deferral here
+    // is handled at the NATIVE dispatch-queue level (onAudioLevel runs on
+    // DISPATCH_QUEUE_PRIORITY_HIGH, onChunkReady on PRIORITY_LOW). Deferring
+    // in JS adds no real prioritization — JS is single-threaded, so the
+    // deferral only shifts work to the next macrotask. Worse, on the
+    // teardown path native emits two onChunkReady events back-to-back (the
+    // last real chunk with isLast=NO, then a terminator with isLast=YES)
+    // and then onMaxDurationReached. A setTimeout(0) on the non-final chunk
+    // let onMaxDurationReached run first and clear consumer state before
+    // the deferred dispatch fired — the last real chunk was dropped.
     const chunkListener = AudioChunkRecorderEventEmitter.addListener(
       "onChunkReady",
       (chunk: ChunkData) => {
-        const dispatch = () => {
-          this.notifyListeners("onChunkReady", chunk);
-          options.onChunkReady?.(chunk);
+        this.notifyListeners("onChunkReady", chunk);
+        options.onChunkReady?.(chunk);
 
-          // Upload chunk if uploader is provided
-          if (options.chunkUploader) {
-            options.chunkUploader.upload(chunk).catch((error) => {
-              console.error("AudioRecorderCore: Chunk upload failed:", error);
-              errorTracker.captureException(error, {
-                chunk: chunk,
-                action: "chunk_upload",
-                chunkSeq: chunk.sequence,
-              });
-              options.chunkUploader?.onError?.(
-                chunk.sequence.toString(),
-                error.message || "Upload failed"
-              );
+        if (options.chunkUploader) {
+          options.chunkUploader.upload(chunk).catch((error) => {
+            console.error("AudioRecorderCore: Chunk upload failed:", error);
+            errorTracker.captureException(error, {
+              chunk: chunk,
+              action: "chunk_upload",
+              chunkSeq: chunk.sequence,
             });
-          }
-        };
-
-        // Non-final chunks are deferred to next tick to keep audio-level
-        // updates smooth during ongoing capture. The FINAL chunk must dispatch
-        // synchronously: native emits onChunkReady(isLast:YES) immediately
-        // followed by onMaxDurationReached, whose handler runs synchronously
-        // (no setTimeout) and tears down consumer state (e.g. clears the
-        // requestId the chunk uploader needs). If we defer the final chunk
-        // too, that teardown wins the race and the final chunk is dropped —
-        // server never receives isFinal=true and the recording never
-        // finalizes. Recording has ended at this point, so the audio-level
-        // priority concern no longer applies.
-        if (chunk.isLastChunk === true) {
-          dispatch();
-        } else {
-          setTimeout(dispatch, 0);
+            options.chunkUploader?.onError?.(
+              chunk.sequence.toString(),
+              error.message || "Upload failed"
+            );
+          });
         }
       }
     );
